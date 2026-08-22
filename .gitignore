@@ -69,6 +69,8 @@ assets/__pycache__/
 
 assets/generate-waitlist.py
 
+.cate
+
 .kommandr/
 
 # Local scratch tests (never commit)

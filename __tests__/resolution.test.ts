@@ -17,6 +17,7 @@ import type { UnresolvedRef } from '../src/resolution/types';
 import { detectFrameworks, getAllFrameworkResolvers } from '../src/resolution/frameworks';
 import { QueryBuilder } from '../src/db/queries';
 import { DatabaseConnection } from '../src/db';
+import { ToolHandler } from '../src/mcp/tools';
 
 describe('Resolution Module', () => {
   let tempDir: string;
@@ -83,6 +84,228 @@ describe('Resolution Module', () => {
       expect(result?.resolvedBy).toBe('exact-match');
     });
 
+    it('should match Godot res:// file path references', () => {
+      const fileNode: Node = {
+        id: 'file:core/cards/card_resource.gd',
+        kind: 'file',
+        name: 'card_resource.gd',
+        qualifiedName: 'core/cards/card_resource.gd',
+        filePath: 'core/cards/card_resource.gd',
+        language: 'gdscript',
+        startLine: 1,
+        endLine: 10,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: Date.now(),
+      };
+
+      const context: ResolutionContext = {
+        getNodesInFile: () => [fileNode],
+        getNodesByName: (name) => name === 'card_resource.gd' ? [fileNode] : [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: () => true,
+        readFile: () => null,
+        getProjectRoot: () => '/test',
+        getAllFiles: () => ['core/cards/card_resource.gd'],
+      };
+
+      const ref = {
+        fromNodeId: 'file:data/cards/ace.tres',
+        referenceName: 'res://core/cards/card_resource.gd',
+        referenceKind: 'references' as const,
+        line: 4,
+        column: 10,
+        filePath: 'data/cards/ace.tres',
+        language: 'godot_resource' as const,
+      };
+
+      const result = matchReference(ref, context);
+
+      expect(result).not.toBeNull();
+      expect(result?.targetNodeId).toBe('file:core/cards/card_resource.gd');
+      expect(result?.resolvedBy).toBe('file-path');
+    });
+
+    it('should find MCP callers when queried with a Godot res:// path', async () => {
+      fs.mkdirSync(path.join(tempDir, 'runtime'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'runtime/run_state.gd'),
+        'class_name RunState\nextends RefCounted\n'
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'main.gd'),
+        'const RunStateScript := preload("res://runtime/run_state.gd")\n'
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+      const handler = new ToolHandler(cg);
+
+      const result = await handler.execute('codegraph_callers', {
+        symbol: 'res://runtime/run_state.gd',
+        projectPath: tempDir,
+      });
+
+      const text = result.content[0]?.text ?? '';
+      expect(result.isError).not.toBe(true);
+      expect(text).toContain('main.gd');
+    });
+
+    it('should resolve GDScript node path references to Godot scene nodes', async () => {
+      fs.writeFileSync(
+        path.join(tempDir, 'status_view.gd'),
+        [
+          'extends Control',
+          '@onready var _template: Control = $MarginContainer/StatusFlow/StatusIconTemplate',
+          '@onready var _track: Control = get_node("%TrackPanel")',
+          '',
+        ].join('\n')
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'status_view.tscn'),
+        [
+          '[gd_scene load_steps=2 format=3]',
+          '[ext_resource type="Script" path="res://status_view.gd" id="1_status"]',
+          '[node name="StatusView" type="Control"]',
+          'script = ExtResource("1_status")',
+          '[node name="MarginContainer" type="MarginContainer" parent="."]',
+          '[node name="StatusFlow" type="HFlowContainer" parent="MarginContainer"]',
+          '[node name="StatusIconTemplate" type="Control" parent="MarginContainer/StatusFlow"]',
+          '[node name="TrackPanel" type="Control" parent="."]',
+          '',
+        ].join('\n')
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'other_view.tscn'),
+        [
+          '[gd_scene format=3]',
+          '[node name="OtherView" type="Control"]',
+          '[node name="StatusIconTemplate" type="Control" parent="."]',
+          '[node name="TrackPanel" type="Control" parent="."]',
+          '',
+        ].join('\n')
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+      const handler = new ToolHandler(cg);
+
+      const templateResult = await handler.execute('codegraph_callers', {
+        symbol: 'StatusIconTemplate',
+        projectPath: tempDir,
+      });
+      const trackResult = await handler.execute('codegraph_callers', {
+        symbol: 'TrackPanel',
+        projectPath: tempDir,
+      });
+
+      expect(templateResult.content[0]?.text ?? '').toContain('StatusIconTemplate');
+      expect(trackResult.content[0]?.text ?? '').toContain('TrackPanel');
+    });
+
+    it('should resolve autoload singleton receivers to their script methods', async () => {
+      fs.mkdirSync(path.join(tempDir, 'autoload'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'project.godot'),
+        [
+          '[application]',
+          'config/name="Demo"',
+          '',
+          '[autoload]',
+          '',
+          'GameState="*res://autoload/game_state.gd"',
+          '',
+        ].join('\n')
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'autoload/game_state.gd'),
+        [
+          'extends Node',
+          'var score := 0',
+          '',
+          'func reset() -> void:',
+          '\tscore = 0',
+          '',
+        ].join('\n')
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'hud.gd'),
+        [
+          'extends Control',
+          '',
+          'func _ready() -> void:',
+          '\tGameState.reset()',
+          '\tGameState.queue_free()',
+          '',
+        ].join('\n')
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      // The autoload marker component must exist and reference its script file.
+      const autoloadMarker = cg.getNodesByKind('component').find(
+        (n) => n.name === 'GameState' && n.decorators?.includes('autoload')
+      );
+      expect(autoloadMarker).toBeDefined();
+
+      // _ready's calls must reach game_state.gd's reset() — but NOT queue_free()
+      // (an engine method that doesn't exist in the script stays unresolved).
+      const ready = cg
+        .getNodesByKind('method')
+        .find((n) => n.name === '_ready' && n.filePath!.endsWith('hud.gd'));
+      expect(ready).toBeDefined();
+      const targets = cg
+        .getOutgoingEdges(ready!.id)
+        .filter((e) => e.kind === 'calls')
+        .map((e) => cg.getNode(e.target));
+      const reset = targets.find((t) => t?.name === 'reset');
+      expect(reset).toBeDefined();
+      expect(reset?.filePath).toContain('game_state.gd');
+    });
+
+    it('should include Godot scene instances when querying callers by instance node name', async () => {
+      fs.writeFileSync(
+        path.join(tempDir, 'battle_status.gd'),
+        'class_name BattleStatusView\nextends Control\n'
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'battle_status.tscn'),
+        [
+          '[gd_scene load_steps=2 format=3]',
+          '[ext_resource type="Script" path="res://battle_status.gd" id="1_status_script"]',
+          '[node name="BattleStatusView" type="Control"]',
+          'script = ExtResource("1_status_script")',
+          '',
+        ].join('\n')
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'control_middle.tscn'),
+        [
+          '[gd_scene load_steps=2 format=3]',
+          '[ext_resource type="PackedScene" path="res://battle_status.tscn" id="1_status_scene"]',
+          '[node name="ControlMiddle" type="Control"]',
+          '[node name="BattleStatusView" parent="." instance=ExtResource("1_status_scene")]',
+          '',
+        ].join('\n')
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+      const handler = new ToolHandler(cg);
+
+      const result = await handler.execute('codegraph_callers', {
+        symbol: 'BattleStatusView',
+        projectPath: tempDir,
+      });
+
+      const text = result.content[0]?.text ?? '';
+      expect(result.isError).not.toBe(true);
+      expect(text).toContain('control_middle.tscn:4');
+      expect(text).toContain('BattleStatusView (component)');
+    });
+
     it('should resolve Erlang -behaviour refs only to module namespaces', () => {
       // On emqx, `-behaviour(supervisor)` (OTP behaviour, not in the repo)
       // fell through to bare-name matching and resolved to a
@@ -96,10 +319,10 @@ describe('Resolution Module', () => {
         language: 'erlang',
         startLine: 61,
         endLine: 61,
-        startColumn: 0,
-        endColumn: 0,
-        updatedAt: Date.now(),
-      };
+    startColumn: 0,
+    endColumn: 0,
+    updatedAt: Date.now(),
+  };
       const behaviourModule: Node = {
         id: 'namespace:src/my_behaviour.erl:my_behaviour:1',
         kind: 'namespace',
@@ -171,6 +394,7 @@ describe('Resolution Module', () => {
       });
       expect(matchReference(appRef('ssl'), context)).toBeNull();
       expect(matchReference(appRef('my_behaviour'), context)?.targetNodeId).toBe(behaviourModule.id);
+
     });
 
     it('should prefer same-module candidates over cross-module matches', () => {

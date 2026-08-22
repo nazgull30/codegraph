@@ -11,7 +11,7 @@ import * as fsp from 'fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'godot_resource' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -50,6 +50,8 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   terraform: 'tree-sitter-terraform.wasm',
   arkts: 'tree-sitter-arkts.wasm',
   nix: 'tree-sitter-nix.wasm',
+
+  gdscript: 'tree-sitter-gdscript.wasm',
 };
 
 /**
@@ -123,6 +125,12 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.luau': 'luau',
   '.m': 'objc',
   '.mm': 'objc',
+
+  // GDSCript / Godot engine files
+  '.gd': 'gdscript',
+  '.tscn': 'godot_resource',
+  '.tres': 'godot_resource',
+  '.godot': 'godot_resource',
   '.sol': 'solidity',
   // CFML: .cfc/.cfm parse with the tag-aware `cfml` grammar (custom CfmlExtractor
   // dialect-switches to cfscript for bare-script content); .cfs is pure CFScript.
@@ -338,6 +346,9 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // kernel compiles the same-commit vendored C (codegraph-kernel/grammars/
   // dart); crates.io tree-sitter-dart is a different-lineage fork (rejected).
   'dart',
+  // GDScript: tree-sitter-gdscript v6.1.0 wasm (ABI 14), vendored by the
+  // Godot/GDScript support work — tree-sitter-wasms doesn't ship it.
+  'gdscript',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */
@@ -532,6 +543,7 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'astro') return true; // custom extractor (frontmatter/script block delegation)
   if (language === 'liquid') return true; // custom regex extractor
   if (language === 'razor') return true; // custom RazorExtractor (.cshtml/.razor markup)
+  if (language === 'godot_resource') return true; // custom Godot scene/resource extractor
   if (language === 'yaml') return true; // file-level tracking only; Drupal routing extraction via framework resolver
   if (language === 'twig') return true; // file-level tracking only
   if (language === 'xml') return true; // MyBatis mapper extractor
@@ -544,7 +556,7 @@ export function isLanguageSupported(language: Language): boolean {
  * Check if a grammar has been loaded and is ready for parsing.
  */
 export function isGrammarLoaded(language: Language): boolean {
-  if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
+  if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor' || language === 'godot_resource') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
   return languageCache.has(language);
@@ -567,7 +579,7 @@ export function isFileLevelOnlyLanguage(language: Language): boolean {
  * Get all supported languages (those with grammar definitions).
  */
 export function getSupportedLanguages(): Language[] {
-  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'astro', 'liquid'];
+  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'astro', 'liquid', 'razor', 'godot_resource'];
 }
 
 /**
@@ -641,6 +653,9 @@ export function getLanguageDisplayName(language: Language): string {
     lua: 'Lua',
     luau: 'Luau',
     objc: 'Objective-C',
+
+    gdscript: 'GDScript',
+    godot_resource: 'Godot Resource',
     solidity: 'Solidity',
     nix: 'Nix',
     yaml: 'YAML',

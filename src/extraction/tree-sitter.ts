@@ -28,6 +28,7 @@ import { SvelteExtractor } from './svelte-extractor';
 import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
+import { GodotResourceExtractor } from './godot-resource-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
 import { CfmlExtractor } from './cfml-extractor';
 import { tryKernelExtract, takeDeferredPreParse } from './kernel';
@@ -6682,6 +6683,10 @@ export function extractFromSource(
   } else if (detectedLanguage === 'razor') {
     // Use custom extractor for ASP.NET Razor (.cshtml) / Blazor (.razor) markup
     const extractor = new RazorExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'godot_resource') {
+    // Use custom extractor for Godot text scenes/resources
+    const extractor = new GodotResourceExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'xml') {
     // Custom extractor for MyBatis mapper XML. Non-mapper XML returns just a

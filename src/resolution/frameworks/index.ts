@@ -27,6 +27,7 @@ import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
 import { expoModulesResolver } from './expo-modules';
 import { fabricViewResolver } from './fabric';
+import { godotResolver } from './godot';
 import { cicsResolver } from './cics';
 import { terraformResolver } from './terraform';
 
@@ -72,6 +73,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   expoModulesResolver,
   // React Native Fabric / Codegen view components — TS spec → component nodes
   fabricViewResolver,
+  // Godot — res:// path resolution, %UniqueName, class alias matching
+  godotResolver,
   // CICS pseudo-conversational TRANSID hops (COBOL)
   cicsResolver,
   // Terraform / OpenTofu — disambiguate var/local/module/resource refs to same-dir module
