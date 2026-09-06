@@ -12,6 +12,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### New Features
 - **GDScript** is now parsed with a real tree-sitter grammar: classes, methods, signals, enums with members, constants, inner classes, static functions, and lambdas — with no phantom symbols from code-like text inside strings or comments.
 - Godot flows now connect end-to-end through dynamic dispatch: autoload singletons (`GameState.reset()`), engine callbacks (`_ready`, `_process`, `_input`, …), string-keyed dispatch (`call("x")`, `Callable(self, "x")`, `has_method("x")`), and scene-signal connections — a button press links to its handler method even when that handler lives in another file.
+- `codegraph_node` on a Godot **scene** (`.tscn`) now returns a readable scene tree — the node hierarchy with unique `%` names, attached scripts, and every `[connection]` shown as `signal → handler` — plus a compact summary of the `.tres` resources it loads, so an agent sees the whole scene structure in one call instead of reading the raw file. `.tres` files get the same treatment: a resource summary with the scenes that use them. Godot signal→handler edges are labeled in trails and `codegraph_explore` as scene signal connections, so a cross-file handler hop is self-explanatory.
+- Godot scene-signal flows now connect correctly in **monorepo layouts** where several Godot projects share one index — a button press bridges to its handler under the right project root even when sibling projects contain identically-named scripts.
 
 
 ## [1.0.1] - 2026-06-13

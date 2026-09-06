@@ -1003,4 +1003,71 @@ describe('Godot end-to-end — engine virtuals, string dispatch, scene connectio
       cg?.close();
     }
   });
+
+  it('resolves scene signal handlers under the scene\'s project root in a monorepo (submodule-prefixed file ids)', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-gdscene-mono-'));
+    let cg: CodeGraph | undefined;
+    try {
+      // Monorepo layout: multiple Godot projects nested under the indexed root.
+      const write = (rel: string, lines: string[]) => {
+        fs.mkdirSync(path.join(tmpDir, path.dirname(rel)), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, rel), lines.join('\n'));
+      };
+      write('volleycraft/project.godot', ['config_version=5', '', '[application]', 'config/name="Volleycraft"', '']);
+      write('troopduel/project.godot', ['config_version=5', '', '[application]', 'config/name="TroopDuel"', '']);
+      // Same res://-relative script path exists in BOTH projects — the bridge
+      // must pick the one under the scene's own project root.
+      write('volleycraft/menu/Menu.gd', [
+        'extends Control',
+        '',
+        'func _on_battle_pressed() -> void:',
+        '\tpass',
+        '',
+      ]);
+      write('troopduel/menu/Menu.gd', [
+        'extends Control',
+        '',
+        'func _on_battle_pressed() -> void:',
+        '\tpass',
+        '',
+      ]);
+      write('volleycraft/menu/menu.tscn', [
+        '[gd_scene load_steps=2 format=3]',
+        '[ext_resource type="Script" path="res://menu/Menu.gd" id="1_script"]',
+        '[node name="Menu" type="Control"]',
+        'script = ExtResource("1_script")',
+        '[node name="BtnBattle" type="Button" parent="."]',
+        '[connection signal="pressed" from="BtnBattle" to="." method="_on_battle_pressed"]',
+        '',
+      ]);
+
+      cg = CodeGraph.initSync(tmpDir);
+      await cg.indexAll();
+      cg.resolveReferences();
+
+      const volley = cg
+        .getNodesByKind('method')
+        .find((n) => n.name === '_on_battle_pressed' && n.filePath === 'volleycraft/menu/Menu.gd');
+      const troop = cg
+        .getNodesByKind('method')
+        .find((n) => n.name === '_on_battle_pressed' && n.filePath === 'troopduel/menu/Menu.gd');
+      expect(volley).toBeDefined();
+      expect(troop).toBeDefined();
+
+      const bridged = (id: string) =>
+        cg
+          .getIncomingEdges(id)
+          .filter((e) => e.kind === 'calls')
+          .some(
+            (e) =>
+              (e.metadata as { synthesizedBy?: string } | undefined)?.synthesizedBy === 'godot-scene-connection'
+          );
+
+      // Handlers in other projects (decoy) must not get the scene's signal edge.
+      expect(bridged(volley!.id)).toBe(true);
+      expect(bridged(troop!.id)).toBe(false);
+    } finally {
+      cg?.close();
+    }
+  });
 });
