@@ -88,6 +88,13 @@ export class GodotResourceExtractor {
         continue;
       }
 
+      // A Godot section ends at the line before the next `[xxx]` header. Close
+      // the previous owner with its real span so scene-tree rendering can read
+      // the section's property block off disk (endLine is exclusive).
+      if (currentOwner && currentOwner.endLine === currentOwner.startLine) {
+        currentOwner.endLine = lineNumber;
+      }
+
       const type = section[1]!;
       const attrs = this.parseAttributes(section[2] ?? '');
       this.inAutoloadSection = type === 'autoload';
@@ -138,6 +145,12 @@ export class GodotResourceExtractor {
       } else {
         currentOwner = null;
       }
+    }
+
+    // Close the last section — it spans to the end of the file (endLine
+    // exclusive, matching the file node's own span).
+    if (currentOwner && currentOwner.endLine === currentOwner.startLine) {
+      currentOwner.endLine = this.lines.length;
     }
 
     this.extractInlineResourcePaths(fileNodeId);

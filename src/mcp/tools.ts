@@ -1613,6 +1613,22 @@ export class ToolHandler {
         registeredAt,
       };
     }
+    if (m?.synthesizedBy === 'godot-scene-connection') {
+      const sig = m.via ? `\`${String(m.via)}\`` : 'a scene signal';
+      return {
+        label: `Godot scene signal ${sig} → handler (wired in .tscn, dynamic dispatch)`,
+        compact: `dynamic: scene signal ${sig} → handler${at}`,
+        registeredAt,
+      };
+    }
+    if (m?.synthesizedBy === 'godot-engine-virtual') {
+      const via = m.via ? `\`${String(m.via)}\`` : 'an engine virtual';
+      return {
+        label: `Godot engine virtual ${via} — the game loop calls this callback (dynamic dispatch)`,
+        compact: `dynamic: engine virtual ${via}${at}`,
+        registeredAt,
+      };
+    }
     return null;
   }
 
@@ -1638,7 +1654,7 @@ export class ToolHandler {
       // names (Class.method / Class::method) — the agent's most precise input,
       // resolved exactly by findAllSymbols. (The old strip mangled Class.method
       // into Class, throwing the method away.)
-      const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro)$/i;
+      const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro|gd|tscn|tres|godot)$/i;
       const tokens = [...new Set(
         query.split(/[\s,()[\]]+/)
           .map((t) => t.replace(FILE_EXT, '').trim())
@@ -2161,7 +2177,7 @@ export class ToolHandler {
     // agent explicitly named is in the subgraph and its file is scored.
     const namedSeedIds = new Set<string>();
     {
-      const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro)$/i;
+      const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro|gd|tscn|tres|godot)$/i;
       const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
       const isTestPath = (p: string) => /(^|\/)(tests?|specs?|__tests__|testdata|mocks?|fixtures?)\//i.test(p) || /\.(test|spec)\.[a-z]+$/i.test(p);
       const bodyLines = (n: Node) => Math.max(0, (n.endLine ?? n.startLine) - n.startLine);
@@ -3254,6 +3270,20 @@ export class ToolHandler {
       return this.textResult(this.truncateOutput(out.join('\n')));
     }
 
+    // Godot scene/resource files: the default view is the structured scene
+    // summary (scene tree + script attachments + signal wiring) instead of a
+    // 300–600-line inspector dump. Raw bytes stay one `offset`/`limit` away —
+    // pass either and we window the file exactly as Read does below.
+    if (resolved.language === 'godot_resource' && opts.offset === undefined && opts.limit === undefined) {
+      const fileNode = (cg.getNodesInFile(filePath) ?? []).find((n) => n.kind === 'file');
+      if (fileNode) {
+        const summary = this.renderGodotSection(cg, fileNode, false);
+        if (summary) {
+          return this.textResult(`${summary}\n\n**${filePath}** — ${depSummary}`);
+        }
+      }
+    }
+
     // Read the current bytes from disk through the security chokepoint
     // (validatePathWithinRoot: blocks `../` traversal and symlink escapes, #527).
     const abs = validatePathWithinRoot(cg.getProjectRoot(), filePath);
@@ -3314,6 +3344,11 @@ export class ToolHandler {
 
   /** Render one symbol: details + (optional) body/outline + its caller/callee trail. */
   private async renderNodeSection(cg: CodeGraph, node: Node, includeCode: boolean): Promise<string> {
+    // Godot scene/resource files: render the structured scene tree + wiring
+    // instead of a raw dump (file node) or a bare header line (scene node).
+    if (node.language === 'godot_resource') {
+      return this.renderGodotSection(cg, node, includeCode);
+    }
     let code: string | null = null;
     let outline: string | null = null;
     if (includeCode) {
@@ -3329,6 +3364,208 @@ export class ToolHandler {
       }
     }
     return this.formatNodeDetails(node, code, outline) + this.formatTrail(cg, node);
+  }
+
+  /**
+   * Godot scene/resource files rendered as a structured summary instead of raw
+   * text. The graph holds the scene-node hierarchy (`component` `contains`
+   * edges); this lays it out as an indented tree with each node's script
+   * attachment, sub-scene `instance`, unique-name marker, plus the file's
+   * signal connections and resource imports — the "how does this work"
+   * surface. Godot's per-node inspector boilerplate (anchors/layout/priority —
+   * dozens of lines a node) is deliberately left on disk; `includeCode` on a
+   * specific scene node expands just that one node's property block. Raw bytes
+   * stay one `offset`/`limit` file-view away.
+   */
+  private renderGodotSection(cg: CodeGraph, node: Node, includeCode: boolean): string {
+    const fileNode = node.kind === 'file'
+      ? node
+      : (cg.getNodesInFile(node.filePath) ?? []).find((n) => n.kind === 'file') ?? null;
+    if (!fileNode) return '';
+
+    // Read the file's current bytes through the security chokepoint (#527).
+    let fileLines: string[] = [];
+    const absPath = validatePathWithinRoot(cg.getProjectRoot(), fileNode.filePath);
+    if (absPath) {
+      try { fileLines = readFileSync(absPath, 'utf-8').split('\n'); } catch { fileLines = []; }
+    }
+
+    const isSceneNode = (c: Node): boolean => c.kind === 'component' && !!c.signature?.startsWith('[node ');
+    const children = cg.getChildren(fileNode.id).sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+    const imports = children.filter((c) => c.kind === 'import');
+    // Scene nodes nest via `contains` edges (only the ROOT attaches to the file
+    // node) — gather the whole hierarchy, the tree walk below reuses it.
+    const sceneNodes: Node[] = [];
+    {
+      const seenIds = new Set<string>();
+      const walk = (id: string): void => {
+        for (const c of cg.getChildren(id)) {
+          if (seenIds.has(c.id)) continue;
+          seenIds.add(c.id);
+          if (isSceneNode(c)) sceneNodes.push(c);
+          if (c.kind === 'component') walk(c.id);
+        }
+      };
+      walk(fileNode.id);
+      sceneNodes.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+    }
+    const sceneRoots = children.filter(isSceneNode);
+    const sectionNodes = children.filter((c) => c.kind === 'component' && !isSceneNode(c));
+
+    // [ext_resource] id → res:// path, for resolving `script = ExtResource("id")`.
+    const extById = new Map<string, string>();
+    for (const im of imports) {
+      const sigM = im.signature?.match(/\bid="([^"]+)"/);
+      if (sigM) extById.set(sigM[1]!, im.name);
+    }
+
+    // Parse a section's `key = value` property lines from its on-disk span.
+    // The header line is 1-indexed startLine; endLine is exclusive, so
+    // properties live in [startLine, endLine - 2] (0-based), empty when a node
+    // has no body before the next `[xxx]` section.
+    const sectionProps = (n: Node): Map<string, string> => {
+      const props = new Map<string, string>();
+      if (fileLines.length === 0 || n.startLine < 1 || n.endLine <= n.startLine) return props;
+      for (let i = n.startLine; i < n.endLine - 1 && i < fileLines.length; i++) {
+        const m = fileLines[i]?.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.+)$/);
+        if (m) props.set(m[1]!, m[2]!.trim());
+      }
+      return props;
+    };
+    const resourceOf = (props: Map<string, string>, key: string): string | undefined => {
+      const v = props.get(key);
+      if (!v) return undefined;
+      const id = v.match(/"([^"]+)"/)?.[1];
+      return id ? extById.get(id) : undefined;
+    };
+    const typeOf = (n: Node): string => n.signature?.match(/type="([^"]+)"/)?.[1] ?? 'Node';
+    const childSceneNodes = (n: Node): Node[] =>
+      cg.getChildren(n.id)
+        .filter((c) => c.kind === 'component' && c.signature?.startsWith('[node '))
+        .sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+
+    // Indented scene tree from the `contains` graph.
+    const treeLines: string[] = [];
+    if (sceneRoots.length > 0) {
+      treeLines.push('**Scene tree:**', '');
+      const visit = (n: Node, prefix: string, isLast: boolean): void => {
+        const kids = childSceneNodes(n);
+        const props = sectionProps(n);
+        const script = resourceOf(props, 'script');
+        const inst = resourceOf(props, 'instance');
+        const uniq = props.get('unique_name_in_owner') === 'true' ? ` %${n.name}` : '';
+        const tail = [
+          script ? `  script=${script}` : '',
+          inst ? `  instance=@${inst.replace(/^res:\/\//, '')}` : '',
+        ].filter(Boolean).join('');
+        treeLines.push(`${prefix}${isLast ? '└─ ' : '├─ '}${n.name} (${typeOf(n)})${uniq}${tail}`);
+        for (let i = 0; i < kids.length; i++) {
+          visit(kids[i]!, `${prefix}${isLast ? '    ' : '│   '}`, i === kids.length - 1);
+        }
+      };
+      sceneRoots.forEach((r, i) => visit(r, '', i === sceneRoots.length - 1));
+      treeLines.push('');
+    }
+
+    // Signal wiring — verbatim `[connection]` lines, grouped by the emitting
+    // node with the handler's script resolved from the `to` node's attachment.
+    const connections: Array<{ line: number; from: string; to: string; signal: string; method: string }> = [];
+    for (let i = 0; i < fileLines.length; i++) {
+      const m = fileLines[i]?.match(/^\[connection\s+(.*)\]\s*$/);
+      if (!m) continue;
+      const attrs = new Map<string, string>();
+      const attrRe = /([A-Za-z_]\w*)=(?:"([^"]*)"|'([^']*)'|([^\s]+))/g;
+      let am: RegExpExecArray | null;
+      while ((am = attrRe.exec(m[1]!)) !== null) attrs.set(am[1]!, am[2] ?? am[3] ?? am[4] ?? '');
+      const method = attrs.get('method');
+      if (!method) continue;
+      connections.push({
+        line: i + 1,
+        from: attrs.get('from') ?? '.',
+        to: attrs.get('to') ?? '.',
+        signal: attrs.get('signal') ?? 'signal',
+        method,
+      });
+    }
+    const nodeByScenePath = new Map<string, Node>();
+    for (const n of sceneNodes) {
+      const seg = n.qualifiedName.split('::node:')[1];
+      if (seg) nodeByScenePath.set(seg, n);
+    }
+    const resolveScenePath = (p: string): Node | null => {
+      const norm = p.replace(/^\.\/+/, '').replace(/\/+$/, '');
+      if (norm === '.' || norm.length === 0) return sceneNodes[0] ?? null;
+      if (norm.startsWith('%')) {
+        const name = norm.slice(1);
+        return sceneNodes.find((n) => sectionProps(n).get('unique_name_in_owner') === 'true' && n.name === name) ?? null;
+      }
+      return nodeByScenePath.get(norm) ?? null;
+    };
+    const lastSegment = (p: string): string => p.split('/').pop() ?? p;
+    const connLines: string[] = [];
+    if (connections.length > 0) {
+      connLines.push('**Signal connections (scene → handler):**', '');
+      for (const c of connections) {
+        const fromSource = c.from.replace(/^%/, '');
+        const toNode = resolveScenePath(c.to);
+        const toScript = toNode ? resourceOf(sectionProps(toNode), 'script') : undefined;
+        const toClue = toScript ? `  in \`${toScript}\`` : '';
+        connLines.push(`- \`${lastSegment(fromSource)}\` [${c.signal}] → \`${c.method}\`${toClue} — :${c.line}`);
+      }
+      connLines.push('');
+    }
+
+    // Resource imports + sub/resource sections, kept compact (counts not dumps).
+    const resLines: string[] = [];
+    if (imports.length > 0 || sectionNodes.length > 0) {
+      resLines.push('**Resources:**', '');
+      const RES_CAP = 18;
+      const shown = [
+        ...imports.map((n) => {
+          const t = n.signature?.match(/type="([^"]+)"/)?.[1];
+          return `- import \`${n.name}\`${t ? ` (${t})` : ''}`;
+        }),
+        ...sectionNodes.map((n) => {
+          const props = sectionProps(n);
+          const t = n.signature?.match(/type="([^"]+)"/)?.[1] ?? n.signature ?? 'section';
+          const cnt = props.size ? ` — ${props.size} propert${props.size === 1 ? 'y' : 'ies'}` : '';
+          return `- ${n.name} (${t})${cnt}`;
+        }),
+      ];
+      resLines.push(...shown.slice(0, RES_CAP));
+      if (shown.length > RES_CAP) resLines.push(`- … +${shown.length - RES_CAP} more`);
+      resLines.push('');
+    }
+
+    const kindLabel = sceneNodes.length ? 'scene' : 'resource';
+    const out: string[] = [
+      `## ${fileNode.name} (godot ${kindLabel})`,
+      '',
+      `**${sceneNodes.length} scene node${sceneNodes.length === 1 ? '' : 's'} · ${connections.length} signal connection${connections.length === 1 ? '' : 's'} · ${imports.length} import${imports.length === 1 ? '' : 's'}** — ${fileLines.length} lines (raw text via offset/limit)`,
+      '',
+      ...treeLines,
+      ...connLines,
+      ...resLines,
+    ];
+
+    // `includeCode` on a section (scene node / sub_resource) → its own verbatim
+    // property block, numbered so the agent can cite/edit exact lines.
+    if (includeCode && node.kind === 'component') {
+      const block: string[] = [];
+      for (let i = node.startLine; i < node.endLine - 1 && i < fileLines.length; i++) {
+        block.push(`${i + 1}\t${fileLines[i]}`);
+      }
+      if (block.length) {
+        out.push(`**Properties of \`${node.name}\` (${typeOf(node)}):**`, '', '```', ...block, '```', '');
+      }
+    }
+
+    out.push(
+      '> Scene tree is a graph render — pass `offset`/`limit` for the original scene lines (like Read), or includeCode on a node for its properties.'
+    );
+    const trail = this.formatTrail(cg, node);
+    if (trail) out.push(trail);
+    return out.join('\n');
   }
 
   /**
@@ -3350,8 +3587,19 @@ export class ToolHandler {
     const collect = (edges: Array<{ node: Node; edge: Edge }>): Array<{ node: Node; edge: Edge }> => {
       const seen = new Set<string>([node.id]);
       const out: Array<{ node: Node; edge: Edge }> = [];
+      const best = new Map<string, { node: Node; edge: Edge }>();
       for (const e of edges) {
         if (seen.has(e.node.id)) continue;
+        const existing = best.get(e.node.id);
+        // A symbol is often reachable by BOTH a static edge and a synthesized
+        // one (a scene node's signal handler resolves statically AND via
+        // godot-scene-connection). Prefer the labeled synthesized edge as the
+        // display hop — it says HOW the connection exists; file:line is the same
+        // target either way. Keeps first-seen otherwise.
+        if (!existing) best.set(e.node.id, e);
+        else if (!this.synthEdgeNote(existing.edge) && this.synthEdgeNote(e.edge)) best.set(e.node.id, e);
+      }
+      for (const e of best.values()) {
         seen.add(e.node.id);
         out.push(e);
       }

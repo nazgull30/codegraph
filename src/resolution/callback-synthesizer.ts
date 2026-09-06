@@ -1582,14 +1582,43 @@ function godotEngineVirtualEdges(queries: QueryBuilder): Edge[] {
 function godotSceneConnectionEdges(queries: QueryBuilder): Edge[] {
   const edges: Edge[] = [];
   const seen = new Set<string>();
+
+  // res:// paths resolve against the Godot *project* (project.godot) root, not
+  // the indexed repo root. In a monorepo that indexes submodules together, the
+  // handler script's file node is `file:volleycraft/menu/Menu.gd` while the
+  // scene's connection metadata carries `res://menu/Menu.gd` (submodule-
+  // relative). Resolve the script under the nearest ancestor of the scene file
+  // that has a project.godot — unambiguous because submodules never nest.
+  const rootByDir = new Map<string, string | null>();
+  const projectRootFor = (scenePath: string): string | null => {
+    let dir = scenePath.includes('/') ? scenePath.slice(0, scenePath.lastIndexOf('/')) : '';
+    while (true) {
+      if (rootByDir.has(dir)) return rootByDir.get(dir)!;
+      if (queries.getNodeById(`file:${dir ? `${dir}/` : ''}project.godot`)) {
+        rootByDir.set(dir, dir);
+        return dir;
+      }
+      if (!dir) {
+        rootByDir.set(dir, null);
+        return null;
+      }
+      const slash = dir.lastIndexOf('/');
+      dir = slash === -1 ? '' : dir.slice(0, slash);
+    }
+  };
+
   for (const e of queries.getEdgesByProvenance('heuristic')) {
     const method = e.metadata?.method as string | undefined;
     const scriptResPath = e.metadata?.scriptResPath as string | undefined;
     if (!e.metadata?.signal || !method || !scriptResPath || !scriptResPath.startsWith('res://')) continue;
 
-    // file node ids are `file:<project-relative-path>` — exactly what the
-    // res:// path holds after stripping the protocol.
-    const fileId = `file:${scriptResPath.replace(/^res:\/\//, '')}`;
+    const relPath = scriptResPath.replace(/^res:\/\//, '');
+    const scenePath = queries.getNodeById(e.source)?.filePath;
+    // Flat single-project layouts (project.godot absent from the index) fall
+    // back to assuming res:// is already repo-root-relative.
+    const fileId = scenePath
+      ? `file:${(() => { const root = projectRootFor(scenePath); return root ? `${root}/${relPath}` : relPath; })()}`
+      : `file:${relPath}`;
     const candidates: Node[] = [];
     const walk = (nodeId: string, depth: number): void => {
       if (depth > 4) return;
